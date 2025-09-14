@@ -1,0 +1,502 @@
+// app.js - PDF Form Filling Tool Application
+
+// Global variables
+let pdfDoc = null;
+let currentPDF = null;
+let currentMapping = null;
+let fieldValues = {};
+let radioGroups = {};
+let canvases = []; // Store all canvas elements
+
+// Initialize PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = “https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.269/pdf.worker.min.js”;
+
+// DOM Elements
+const pdfInput = document.getElementById(“pdf-input”);
+const jsonInput = document.getElementById(“json-input”);
+const uploadPdfBtn = document.getElementById(“upload-pdf-btn”);
+const uploadJsonBtn = document.getElementById(“upload-json-btn”);
+const exportPdfBtn = document.getElementById(“export-pdf-btn”);
+const pdfContainer = document.getElementById(“pdf-container”);
+const overlayContainer = document.getElementById(“overlay-container”);
+
+// Event Listeners
+uploadPdfBtn.addEventListener(“click”, () => pdfInput.click());
+uploadJsonBtn.addEventListener(“click”, () => jsonInput.click());
+exportPdfBtn.addEventListener(“click”, exportFilledPDF);
+pdfInput.addEventListener(“change”, handlePDFUpload);
+jsonInput.addEventListener(“change”, handleJSONUpload);
+
+/**
+
+- Show toast notification
+  */
+  function showToast(message, type = “info”) {
+  const toastContainer = document.getElementById(“toast-container”);
+  const toast = document.createElement(“div”);
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  toastContainer.appendChild(toast);
+  
+  setTimeout(() => {
+  toast.style.animation = “slideIn 0.3s ease reverse”;
+  setTimeout(() => toast.remove(), 300);
+  }, 3000);
+  }
+
+/**
+
+- Handle PDF file upload
+  */
+  async function handlePDFUpload(event) {
+  const file = event.target.files[0];
+  if (!file || file.type !== “application/pdf”) {
+  showToast(“Please select a valid PDF file”, “error”);
+  return;
+  }
+  
+  try {
+  const arrayBuffer = await file.arrayBuffer();
+  currentPDF = new Uint8Array(arrayBuffer);
+  
+  ```
+   // Load PDF with PDF.js
+   const loadingTask = pdfjsLib.getDocument(currentPDF);
+   pdfDoc = await loadingTask.promise;
+   
+   // Render all pages
+   await renderPDF();
+   
+   showToast(`PDF loaded successfully (${pdfDoc.numPages} pages)`, "success");
+   
+   // Enable export button if we have both PDF and mapping
+   if (currentMapping) {
+       exportPdfBtn.disabled = false;
+   }
+  ```
+  
+  } catch (error) {
+  console.error(“Error loading PDF:”, error);
+  showToast(“Failed to load PDF file”, “error”);
+  }
+  }
+
+/**
+
+- Handle JSON mapping file upload
+  */
+  async function handleJSONUpload(event) {
+  const file = event.target.files[0];
+  if (!file || !file.name.endsWith(”.json”)) {
+  showToast(“Please select a valid JSON file”, “error”);
+  return;
+  }
+  
+  try {
+  const text = await file.text();
+  currentMapping = JSON.parse(text);
+  
+  ```
+   // Validate JSON structure
+   if (!Array.isArray(currentMapping)) {
+       throw new Error("JSON must be an array of field objects");
+   }
+   
+   // Validate each field has required properties
+   for (const field of currentMapping) {
+       if (!field.id || !field.type || !field.bbox || !field.page) {
+           throw new Error("Each field must have id, type, bbox, and page properties");
+       }
+       if (!Array.isArray(field.bbox) || field.bbox.length !== 4) {
+           throw new Error("bbox must be an array of 4 numbers");
+       }
+   }
+   
+   // Initialize field values and radio groups
+   fieldValues = {};
+   radioGroups = {};
+   currentMapping.forEach(field => {
+       fieldValues[field.id] = field.defaultValue || "";
+       
+       // Track radio button groups
+       if (field.type === "radio" && field.groupId) {
+           if (!radioGroups[field.groupId]) {
+               radioGroups[field.groupId] = [];
+           }
+           radioGroups[field.groupId].push(field.id);
+       }
+   });
+   
+   // Create overlay fields if PDF is loaded
+   if (pdfDoc) {
+       createOverlayFields();
+       exportPdfBtn.disabled = false;
+   }
+   
+   showToast("JSON mapping loaded successfully", "success");
+  ```
+  
+  } catch (error) {
+  console.error(“Error loading JSON:”, error);
+  showToast(`Invalid JSON format: ${error.message}`, “error”);
+  }
+  }
+
+/**
+
+- Render all PDF pages
+  */
+  async function renderPDF() {
+  if (!pdfDoc) return;
+  
+  // Clear existing content
+  pdfContainer.innerHTML = “”;
+  overlayContainer.innerHTML = “”;
+  canvases = [];
+  
+  // Render each page
+  for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+  const page = await pdfDoc.getPage(pageNum);
+  
+  ```
+   // Use scale: 1 for accurate dimensions
+   const viewport = page.getViewport({ scale: 1 });
+   
+   // Create canvas
+   const canvas = document.createElement("canvas");
+   const context = canvas.getContext("2d");
+   canvas.width = viewport.width;
+   canvas.height = viewport.height;
+   canvas.dataset.pageNum = pageNum;
+   
+   // Render PDF page
+   await page.render({
+       canvasContext: context,
+       viewport: viewport
+   }).promise;
+   
+   pdfContainer.appendChild(canvas);
+   canvases.push(canvas);
+  ```
+  
+  }
+  
+  // Setup overlay container
+  setupOverlayContainer();
+  
+  // Create overlay fields if mapping exists
+  if (currentMapping) {
+  createOverlayFields();
+  }
+  }
+
+/**
+
+- Setup overlay container position and size
+  */
+  function setupOverlayContainer() {
+  if (canvases.length === 0) return;
+  
+  const firstCanvas = canvases[0];
+  
+  // Position overlay container relative to PDF container
+  overlayContainer.style.position = “absolute”;
+  overlayContainer.style.left = pdfContainer.offsetLeft + “px”;
+  overlayContainer.style.top = pdfContainer.offsetTop + “px”;
+  overlayContainer.style.width = pdfContainer.scrollWidth + “px”;
+  overlayContainer.style.height = pdfContainer.scrollHeight + “px”;
+  }
+
+/**
+
+- Create overlay fields for all pages
+  */
+  function createOverlayFields() {
+  if (!currentMapping || !pdfDoc) return;
+  
+  overlayContainer.innerHTML = “”;
+  
+  // Create fields for each page
+  canvases.forEach((canvas, index) => {
+  const pageNum = index + 1;
+  const pageFields = currentMapping.filter(field => field.page === pageNum);
+  
+  ```
+   pageFields.forEach(field => {
+       const overlay = createFieldOverlay(field, canvas);
+       if (overlay) {
+           overlayContainer.appendChild(overlay);
+       }
+   });
+  ```
+  
+  });
+  }
+
+/**
+
+- Create individual field overlay
+  */
+  function createFieldOverlay(field, canvas) {
+  const div = document.createElement(“div”);
+  div.className = “field-overlay”;
+  div.dataset.fieldId = field.id;
+  div.dataset.page = field.page;
+  
+  // Calculate position relative to the PDF container
+  const canvasOffsetTop = canvas.offsetTop;
+  const canvasOffsetLeft = canvas.offsetLeft;
+  
+  // Apply the exact formula as specified
+  const [xPct, yPct, wPct, hPct] = field.bbox;
+  const x = xPct * canvas.width;
+  const y = (1 - yPct - hPct) * canvas.height;
+  const w = wPct * canvas.width;
+  const h = hPct * canvas.height;
+  
+  // Set position and size (relative to overlay container)
+  div.style.left = (canvasOffsetLeft + x) + “px”;
+  div.style.top = (canvasOffsetTop + y) + “px”;
+  div.style.width = w + “px”;
+  div.style.height = h + “px”;
+  
+  // Configure based on field type
+  switch (field.type) {
+  case “text”:
+  case “date”:
+  div.className += “ field-text”;
+  div.contentEditable = true;
+  div.textContent = fieldValues[field.id] || “”;
+  div.addEventListener(“input”, () => {
+  fieldValues[field.id] = div.textContent;
+  });
+  break;
+  
+  ```
+   case "signature":
+       div.className += " field-signature";
+       div.contentEditable = true;
+       div.textContent = fieldValues[field.id] || "";
+       div.addEventListener("input", () => {
+           fieldValues[field.id] = div.textContent;
+       });
+       break;
+       
+   case "checkbox":
+       div.className += " field-checkbox";
+       div.textContent = fieldValues[field.id] ? "☑" : "☐";
+       div.addEventListener("click", () => {
+           fieldValues[field.id] = !fieldValues[field.id];
+           div.textContent = fieldValues[field.id] ? "☑" : "☐";
+       });
+       break;
+       
+   case "radio":
+       div.className += " field-radio";
+       div.textContent = fieldValues[field.id] ? "⦿" : "○";
+       div.addEventListener("click", () => {
+           // Handle radio group logic
+           if (field.groupId && radioGroups[field.groupId]) {
+               // Clear other radios in group
+               radioGroups[field.groupId].forEach(radioId => {
+                   if (radioId !== field.id) {
+                       fieldValues[radioId] = false;
+                       const radioDiv = overlayContainer.querySelector(`[data-field-id="${radioId}"]`);
+                       if (radioDiv) {
+                           radioDiv.textContent = "○";
+                       }
+                   }
+               });
+           }
+           // Toggle current radio
+           fieldValues[field.id] = !fieldValues[field.id];
+           div.textContent = fieldValues[field.id] ? "⦿" : "○";
+       });
+       break;
+       
+   default:
+       console.warn(`Unknown field type: ${field.type}`);
+       return null;
+  ```
+  
+  }
+  
+  return div;
+  }
+
+/**
+
+- Export filled PDF with all form data
+  */
+  async function exportFilledPDF() {
+  if (!currentPDF || !currentMapping) {
+  showToast(“Please load both PDF and JSON mapping”, “error”);
+  return;
+  }
+  
+  try {
+  // Load PDF with pdf-lib
+  const pdfDoc = await PDFLib.PDFDocument.load(currentPDF);
+  
+  ```
+   // Try to load David Libre font
+   let customFont = null;
+   try {
+       // Placeholder for local font file
+       const fontResponse = await fetch("DavidLibre-Regular.ttf");
+       if (fontResponse.ok) {
+           const fontBytes = await fontResponse.arrayBuffer();
+           customFont = await pdfDoc.embedFont(fontBytes);
+       }
+   } catch (fontError) {
+       console.log("David Libre font not found, using Helvetica fallback");
+   }
+   
+   // Use Helvetica as fallback
+   const font = customFont || await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+   
+   // Get all pages
+   const pages = pdfDoc.getPages();
+   
+   // Process each field
+   currentMapping.forEach(field => {
+       if (field.page > pages.length) {
+           console.warn(`Field ${field.id} references non-existent page ${field.page}`);
+           return;
+       }
+       
+       const page = pages[field.page - 1];
+       const value = fieldValues[field.id];
+       
+       // Skip if no value (except for checkboxes/radios which can be false)
+       if (!value && value !== false) return;
+       
+       // Get page dimensions
+       const pageWidth = page.getWidth();
+       const pageHeight = page.getHeight();
+       
+       // Apply the exact same formula (but with page dimensions)
+       const [xPct, yPct, wPct, hPct] = field.bbox;
+       const x = xPct * pageWidth;
+       const y = (1 - yPct - hPct) * pageHeight;
+       const w = wPct * pageWidth;
+       const h = hPct * pageHeight;
+       
+       // Draw based on field type
+       switch (field.type) {
+           case "text":
+           case "date":
+               if (typeof value === "string" && value.trim()) {
+                   // Calculate font size based on field height
+                   const fontSize = Math.min(h * 0.6, 12);
+                   
+                   page.drawText(value, {
+                       x: x + 2,
+                       y: y + (h - fontSize) / 2,
+                       size: fontSize,
+                       font: font,
+                       color: PDFLib.rgb(0, 0, 0)
+                   });
+               }
+               break;
+               
+           case "signature":
+               if (typeof value === "string" && value.trim()) {
+                   const fontSize = Math.min(h * 0.6, 12);
+                   
+                   // Draw text in italic (if custom font supports it)
+                   page.drawText(value, {
+                       x: x + 2,
+                       y: y + (h - fontSize) / 2,
+                       size: fontSize,
+                       font: font,
+                       color: PDFLib.rgb(0, 0, 0)
+                   });
+                   
+                   // Add underline
+                   page.drawLine({
+                       start: { x: x, y: y + 2 },
+                       end: { x: x + w, y: y + 2 },
+                       thickness: 0.5,
+                       color: PDFLib.rgb(0, 0, 0)
+                   });
+               }
+               break;
+               
+           case "checkbox":
+               if (value === true) {
+                   const checkSize = Math.min(w, h) * 0.7;
+                   page.drawText("✓", {
+                       x: x + (w - checkSize) / 2,
+                       y: y + (h - checkSize) / 2,
+                       size: checkSize,
+                       font: font,
+                       color: PDFLib.rgb(0, 0, 0)
+                   });
+               }
+               break;
+               
+           case "radio":
+               if (value === true) {
+                   const dotRadius = Math.min(w, h) * 0.25;
+                   page.drawCircle({
+                       x: x + w / 2,
+                       y: y + h / 2,
+                       size: dotRadius,
+                       color: PDFLib.rgb(0, 0, 0)
+                   });
+               }
+               break;
+       }
+   });
+   
+   // Save PDF
+   const pdfBytes = await pdfDoc.save();
+   
+   // Download
+   const blob = new Blob([pdfBytes], { type: "application/pdf" });
+   const url = URL.createObjectURL(blob);
+   const a = document.createElement("a");
+   a.href = url;
+   a.download = "filled_form.pdf";
+   a.click();
+   URL.revokeObjectURL(url);
+   
+   showToast("PDF exported successfully", "success");
+  ```
+  
+  } catch (error) {
+  console.error(“Error exporting PDF:”, error);
+  showToast(“Failed to export PDF: “ + error.message, “error”);
+  }
+  }
+
+/**
+
+- Handle window resize to reposition overlays
+  */
+  window.addEventListener(“resize”, () => {
+  if (pdfDoc && currentMapping) {
+  setupOverlayContainer();
+  createOverlayFields();
+  }
+  });
+
+/**
+
+- Handle scroll to keep overlays aligned
+  */
+  pdfContainer.addEventListener(“scroll”, () => {
+  if (pdfDoc && currentMapping) {
+  setupOverlayContainer();
+  }
+  });
+
+/**
+
+- Initialize app on DOM ready
+  */
+  document.addEventListener(“DOMContentLoaded”, () => {
+  console.log(“PDF Form Filling Tool initialized”);
+  showToast(“Ready to load PDF and JSON mapping”, “info”);
+  });
